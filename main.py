@@ -6,7 +6,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from starlette.requests import Request
 from api.db.database import create_database
 from api.v1.routes import api_version_one
-
+from api.utils.embeddings import load_faiss_index
+from sqlalchemy.orm import Session
+from api.db.database import SessionLocal
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -17,6 +19,11 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
+@app.on_event("startup")
+def startup_event():
+    db: Session = SessionLocal()
+    load_faiss_index(db)
+    db.close()
 
 
 
