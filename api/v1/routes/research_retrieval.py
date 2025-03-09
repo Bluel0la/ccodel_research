@@ -1,117 +1,188 @@
-import requests
-from fastapi import FastAPI, Depends, APIRouter
-from sqlalchemy.orm import Session
-from datetime import datetime, timedelta
-from api.db.database import get_db
-from api.v1.models.cache import CachedResult
-import os
-from dotenv import load_dotenv
-from api.utils.embeddings import search_similar_papers
 import httpx
+import os
 import asyncio
-from api.utils.embeddings import fetch_external_papers, preload_external_papers, save_faiss_index
-from fastapi_utils.tasks import repeat_every  # Auto-scheduler
+from datetime import datetime, timedelta
+from fastapi import APIRouter, Depends
+from sqlalchemy.orm import Session
+from dotenv import load_dotenv
+from api.db.database import get_db, SessionLocal
+from api.v1.models.cache import CachedResult
+from api.utils.embeddings import (
+    save_faiss_index,
+    process_and_store_paper_embeddings,
+    extract_text_from_pdf,
+    extract_text_from_webpage
+)
+from api.utils.embeddings import embed_model, index
+from api.v1.models.embeddings import PaperEmbedding
+import numpy as np
+import re
 
-load_dotenv(".env")
+# Load environment variables
+load_dotenv()
+
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+GOOGLE_CX = os.getenv("GOOGLE_CX")
+SERP_API_KEY = os.getenv("SERP_API_KEY")
+
+# Validate API keys
+if not GOOGLE_API_KEY:
+    print("⚠️ Missing GOOGLE_API_KEY.")
+if not GOOGLE_CX:
+    print("⚠️ Missing GOOGLE_CX (Custom Search Engine ID).")
+if not SERP_API_KEY:
+    print("⚠️ Missing SERP_API_KEY.")
 
 research = APIRouter(prefix="/research", tags=["Research"])
 
-# Load API keys from environment variables
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
-GOOGLE_CX = os.getenv("GOOGLE_CX")  # Custom Search Engine ID
-SERP_API_KEY = os.getenv("SERP_API_KEY")
-
+# Paper Search Functions
 async def fetch_arxiv_results(query: str, max_results=5):
-    """Fetch relevant papers from ArXiv asynchronously."""
+    """Fetch research papers from ArXiv, including abstract and metadata."""
     url = f"http://export.arxiv.org/api/query?search_query=all:{query}&start=0&max_results={max_results}"
+    
     async with httpx.AsyncClient() as client:
         response = await client.get(url)
-    
+
     if response.status_code == 200:
         from xml.etree import ElementTree as ET
         root = ET.fromstring(response.content)
-        results = [
-            {"title": entry.find("{http://www.w3.org/2005/Atom}title").text, "link": entry.find("{http://www.w3.org/2005/Atom}id").text}
+        
+        return [
+            {
+                "title": entry.find("{http://www.w3.org/2005/Atom}title").text,
+                "abstract": entry.find("{http://www.w3.org/2005/Atom}summary").text.strip(),  # Extract abstract
+                "link": entry.find("{http://www.w3.org/2005/Atom}id").text,
+            }
             for entry in root.findall(".//{http://www.w3.org/2005/Atom}entry")
         ]
-        return results
     return []
 
 async def fetch_google_results(query: str, max_results=5):
-    """Fetch results from Google Custom Search API asynchronously."""
+    """Fetch results from Google Custom Search API and extract abstracts."""
+    if not GOOGLE_API_KEY or not GOOGLE_CX:
+        return []
+    
     url = f"https://www.googleapis.com/customsearch/v1?q={query}&key={GOOGLE_API_KEY}&cx={GOOGLE_CX}"
     async with httpx.AsyncClient() as client:
         response = await client.get(url)
-    
+
     if response.status_code == 200:
         data = response.json()
-        return [{"title": item["title"], "link": item["link"]} for item in data.get("items", [])[:max_results]]
+        results = []
+        for item in data.get("items", [])[:max_results]:
+            title = item["title"]
+            link = item["link"]
+
+            # Extract text from link
+            if link.endswith(".pdf"):
+                abstract = extract_text_from_pdf(link)
+            else:
+                abstract = extract_text_from_webpage(link)
+
+            results.append({"title": title, "link": link, "abstract": abstract[:500]})  # Trim abstract
+        return results
+    
     return []
 
 async def fetch_serp_results(query: str, max_results=5):
-    """Fetch results from SERP API asynchronously."""
+    """Fetch results from SERP API and extract abstracts."""
+    if not SERP_API_KEY:
+        return []
+    
     url = f"https://serpapi.com/search.json?q={query}&api_key={SERP_API_KEY}"
     async with httpx.AsyncClient() as client:
         response = await client.get(url)
-    
+
     if response.status_code == 200:
         data = response.json()
-        return [{"title": item["title"], "link": item["link"]} for item in data.get("organic_results", [])[:max_results]]
+        results = []
+        for item in data.get("organic_results", [])[:max_results]:
+            title = item["title"]
+            link = item["link"]
+
+            # Extract text from link
+            if link.endswith(".pdf"):
+                abstract = extract_text_from_pdf(link)
+            else:
+                abstract = extract_text_from_webpage(link)
+
+            results.append({"title": title, "link": link, "abstract": abstract[:500]})  # Trim abstract
+        return results
+    
     return []
 
-@research.get("/search/")
-async def search(query: str, db: Session = Depends(get_db)):
-    """Main search function with caching, FAISS, and async requests."""
-    cached_entry = db.query(CachedResult).filter(CachedResult.query == query).first()
-    
-    if cached_entry and not cached_entry.is_expired():
-        return {"cached": True, "query": query, "results": cached_entry.results}
+def clean_text(text):
+    """Cleans up text by removing unwanted phrases and excess whitespace."""
+    text = re.sub(r"\s+", " ", text)  # Normalize whitespace
+    text = re.sub(r"(Skip to content|Twitter|Facebook|LinkedIn|Email|Print)", "", text)  # Remove boilerplate
+    return text.strip()
 
-    # Run all fetch calls asynchronously
+@research.get("/search/")
+async def search_papers(query: str, db: Session = Depends(get_db)):
+    """Search for research papers, cache results, and store embeddings."""
+
+    # 🔍 Check cache first
+    cached_result = db.query(CachedResult).filter(CachedResult.query == query).first()
+    if cached_result and not cached_result.is_expired():
+        return {"query": query, "results": cached_result.results, "cached": True}
+
+    # 🌍 Fetch results
     arxiv_results, google_results, serp_results = await asyncio.gather(
         fetch_arxiv_results(query),
         fetch_google_results(query),
         fetch_serp_results(query)
     )
 
-    # Get FAISS results
-    faiss_results = search_similar_papers(query, db)
+    # 🧹 Clean abstracts
+    for result_set in [google_results, serp_results]:
+        for paper in result_set:
+            if "abstract" in paper:
+                paper["abstract"] = clean_text(paper["abstract"])
 
+    # 📌 Combine results
     combined_results = {
         "arxiv": arxiv_results,
         "google": google_results,
-        "serpapi": serp_results,
-        "faiss": faiss_results
+        "serpapi": serp_results
     }
 
-    # Store in cache
-    new_cache = CachedResult(
-        query=query,
-        results=combined_results,
-        expires_at=datetime.utcnow() + timedelta(days=7)
-    )
-    db.add(new_cache)
-    db.commit()
+    # 🚨 DEBUG: Check if any papers exist
+    all_papers = arxiv_results + google_results + serp_results
+    print(f"🔍 DEBUG: Found {len(all_papers)} papers to process.")  
 
-    return {"cached": False, "query": query, "results": combined_results}
+    # 🛑 Cache results if not already stored
+    if not db.query(CachedResult).filter(CachedResult.query == query).first():
+        new_cache_entry = CachedResult(
+            query=query,
+            results=combined_results,
+            expires_at=datetime.utcnow() + timedelta(days=7)
+        )
+        db.add(new_cache_entry)
+        db.commit()
 
-
-@research.on_event("startup")
-@repeat_every(seconds=86400)  # Every 24 hours
-def update_papers_periodically():
-    """Fetch new research papers daily and update FAISS."""
-    db = next(get_db())  # Get database session
-    external_papers = fetch_external_papers()
-    
-    if external_papers:
-        preload_external_papers(db, external_papers)
-        save_faiss_index()  # Save updated FAISS index
-        print("🔄 FAISS index updated with new papers.")
+    # 🚀 Process embeddings
+    if all_papers:
+        print("📌 DEBUG: Sending papers for embedding storage...")  
+        await process_and_store_paper_embeddings(all_papers, db)  
     else:
-        print("⚠️ No new external papers found.")
+        print("⚠️ DEBUG: No papers found, skipping embedding storage.")
+
+    return {"query": query, "results": combined_results, "cached": False}
 
 @research.get("/faiss-search/")
-async def faiss_search(query: str, db: Session = Depends(get_db)):
-    """Search only using FAISS (no external sources)."""
-    results = search_similar_papers(query, db)
-    return {"query": query, "faiss_results": results}
+async def faiss_search(query: str, top_k: int = 5, db: Session = Depends(get_db)):
+    """Search for semantically similar research papers using FAISS."""
+    query_embedding = embed_model.encode(query).tolist()
+    D, I = index.search(np.array([query_embedding]), top_k)
+    results = []
+    for idx in I[0]:
+        paper = db.query(PaperEmbedding).filter(PaperEmbedding.id == idx).first()
+        if paper:
+            results.append({
+                "title": paper.title,
+                "abstract": paper.abstract,
+                "key_findings": paper.key_findings,
+                "link": paper.link,
+                "similarity_score": float(D[0][list(I[0]).index(idx)])  # Ensure correct score mapping
+            })
+    return {"query": query, "results": sorted(results, key=lambda x: x["similarity_score"])}

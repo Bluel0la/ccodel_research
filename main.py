@@ -1,13 +1,13 @@
 import uvicorn
 from contextlib import asynccontextmanager
-from typing import Union
+#from typing import Union
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.requests import Request
 from api.db.database import create_database
 from api.v1.routes import api_version_one
-from api.utils.embeddings import load_faiss_index
-from sqlalchemy.orm import Session
+#from api.utils.embeddings import load_faiss_index
+#from sqlalchemy.orm import Session
 from api.db.database import SessionLocal
 
 @asynccontextmanager
@@ -19,11 +19,11 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
-@app.on_event("startup")
-def startup_event():
-    db: Session = SessionLocal()
-    load_faiss_index(db)
-    db.close()
+#@app.on_event("startup")
+#def startup_event():
+#    db: Session = SessionLocal()
+#    load_faiss_index(db)
+#    db.close()
 
 
 
@@ -41,7 +41,6 @@ app.add_middleware(
 
 
 app.include_router(api_version_one)
-# app.include_router(users, tags=["Users"])
 
 
 @app.get("/", tags=["Home"])

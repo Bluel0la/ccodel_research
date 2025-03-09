@@ -7,103 +7,97 @@ from bs4 import BeautifulSoup
 import fitz  # PyMuPDF
 from api.v1.models.embeddings import PaperEmbedding
 import os
+from transformers import pipeline
 
 FAISS_INDEX_PATH = "faiss_index.bin"
 
 # Load embedding model
 embed_model = SentenceTransformer("sentence-transformers/all-mpnet-base-v2")
-embedding_dim = 768  # Keep it consistent
+embedding_dim = 768  # Make sure this matches the model output
 
-# Global FAISS index
-index = faiss.IndexHNSWFlat(embedding_dim, 32)
-index.hnsw.efConstruction = 200  # Controls indexing speed/accuracy
-index.hnsw.efSearch = 64  # Controls search speed/accuracy
-
-
-def preload_external_papers(db: Session, external_papers: list):
-    """Preload FAISS index with external research papers."""
-    entries = []
-    for paper in external_papers:
-        title = paper.get("title", "")
-        abstract = paper.get("abstract", "")
-        key_findings = paper.get("key_findings", [])
-        link = paper.get("link", "")
-
-        full_text = f"{title}. {abstract} {' '.join(key_findings)}"
-        embedding = embed_model.encode(full_text, normalize_embeddings=True).tolist()
-
-        entries.append(PaperEmbedding(
-            title=title, abstract=abstract, key_findings=key_findings, link=link, embedding=embedding
-        ))
-
-    if entries:
-        db.add_all(entries)
-        db.commit()
-        np_embeddings = np.array([e.embedding for e in entries], dtype=np.float32)
-        index.add(np_embeddings)
-
-    print(f"✅ Preloaded {len(entries)} papers into FAISS.")
-
-
-def fetch_external_papers():
-    """Fetch research papers from ArXiv, Google, and SERP API."""
-    query = "artificial intelligence in education"
-    url = f"http://127.0.0.1:8000/api/v1/research/search/?query={query}"
-
-    response = requests.get(url)
-    if response.status_code == 200:
-        data = response.json()
-        papers = []
-        
-        for source in ["arxiv", "serpapi"]:
-            for paper in data["results"].get(source, []):
-                papers.append({
-                    "title": paper.get("title", ""),
-                    "abstract": paper.get("abstract", ""),  # Ensure this is captured
-                    "key_findings": paper.get("key_findings", []),
-                    "link": paper.get("link", "")
-                })
-        return papers
+# Load FAISS index
+def load_faiss_index():
+    """Load FAISS index from disk or initialize a new one."""
+    global index
+    if os.path.exists(FAISS_INDEX_PATH):
+        print("🔄 Loading FAISS index from disk...")
+        index = faiss.read_index(FAISS_INDEX_PATH)
     else:
-        print("⚠️ Failed to fetch external papers.")
-        return []
+        print("🚀 No saved FAISS index found. Creating a new one...")
+        index = faiss.IndexHNSWFlat(embedding_dim, 32)
 
+# Save FAISS index
 def save_faiss_index():
     """Save FAISS index to disk."""
-    if index and index.ntotal > 0:
-        faiss.write_index(index, FAISS_INDEX_PATH)
-        print("💾 FAISS index saved to disk.")
-        
-def load_faiss_index(db: Session):
-    """Load FAISS index from disk or populate it from the database."""
-    global index
+    faiss.write_index(index, FAISS_INDEX_PATH)
 
-    # Try loading from disk
-    if os.path.exists(FAISS_INDEX_PATH):
-        print("📂 Loading FAISS index from disk...")
-        index = faiss.read_index(FAISS_INDEX_PATH)
+# Initialize FAISS
+index = None
+load_faiss_index()
+
+async def process_and_store_paper_embeddings(papers, db: Session):
+    """Generate embeddings, store in DB, and update FAISS."""
+    
+    if not papers:
+        print("⚠️ DEBUG: No papers provided for embedding.")
         return
 
-    # Otherwise, rebuild from DB
-    print("⚠️ No saved FAISS index found. Rebuilding from DB...")
-    papers = db.query(PaperEmbedding).all()
-    if not papers:
-        print("⚠️ No embeddings found in DB.")
-        return  
+    print(f"🔍 DEBUG: Processing {len(papers)} papers for embedding.")
 
-    embeddings = np.array([p.embedding for p in papers], dtype=np.float32)
+    for paper in papers:
+        title = paper.get("title", "Unknown Title")
+        abstract = paper.get("abstract", "").strip()
+        if not abstract:
+            print(f"⚠️ DEBUG: Skipping {title} (no abstract available).")
+            continue  
 
-    if embeddings.shape[0] > 0:
-        index = faiss.IndexFlatL2(embeddings.shape[1])
-        index.add(embeddings)
-        save_faiss_index()  # Save index after loading
+        print(f"🛠️ DEBUG: Generating embedding for {title}...")
 
+        # 1️⃣ Generate key findings
+        key_findings = abstract.split(". ")[:2]
 
+        # 2️⃣ Generate embedding
+        try:
+            embedding = embed_model.encode(abstract).tolist()
+            if not embedding:
+                print(f"❌ DEBUG: Failed to generate embedding for {title}")
+                continue
+        except Exception as e:
+            print(f"🚨 ERROR: Embedding generation failed for {title} → {e}")
+            continue
+
+        # 3️⃣ Store in DB
+        try:
+            new_paper = PaperEmbedding(
+                title=title,
+                abstract=abstract,
+                key_findings=key_findings,
+                link=paper.get("link", ""),
+                embedding=embedding
+            )
+            db.add(new_paper)
+            db.flush()  # Get ID before commit
+
+            # 4️⃣ Update FAISS index
+            paper_id = new_paper.id  # Ensure ID is fetched
+            index.add(np.array([embedding], dtype=np.float32), np.array([paper_id], dtype=np.int64))
+
+            print(f"✅ DEBUG: Successfully stored embedding for {title} (ID: {paper_id})")
+
+        except Exception as e:
+            print(f"🚨 ERROR: Failed to store embedding for {title} → {e}")
+            continue
+
+    db.commit()
+    print("💾 DEBUG: Database commit complete.")
+    save_faiss_index()  # Save after update
 
 def extract_text_from_webpage(url: str) -> str:
-    """Extracts text content from a webpage."""
-    headers = {"User-Agent": "Mozilla/5.0"}
-    response = requests.get(url, headers=headers)
+    """Extract text content from a webpage."""
+    headers = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36"
+    }
+    response = requests.get(url, headers=headers, timeout=10)
 
     if response.status_code == 200:
         soup = BeautifulSoup(response.text, "html.parser")
@@ -113,29 +107,41 @@ def extract_text_from_webpage(url: str) -> str:
     
     return ""
 
+def extract_text_from_pdf(pdf_url: str) -> str:
+    """Extract text from a given PDF link."""
+    response = requests.get(pdf_url, stream=True, timeout=10)
+    if response.status_code == 200:
+        with open("temp.pdf", "wb") as f:
+            f.write(response.content)
+        
+        text = ""
+        with fitz.open("temp.pdf") as doc:
+            for page in doc:
+                text += page.get_text("text") + "\n"
+        return text.strip()
+    
+    return ""
 
-def extract_text_from_pdf(pdf_path: str) -> str:
-    """Extracts text from a given PDF file."""
-    text = ""
-    with fitz.open(pdf_path) as doc:
-        for page in doc:
-            text += page.get_text("text") + "\n"
-    return text.strip()
+def rebuild_faiss_index(db: Session):
+    """Rebuild FAISS index from the database if necessary."""
+    global index
+    index = faiss.IndexHNSWFlat(embedding_dim, 32)  # Reset index
 
+    embeddings = db.query(PaperEmbedding).all()
 
-def search_similar_papers(query: str, db: Session, top_k: int = 3):
-    """Find similar research papers using FAISS."""
-    query_embedding = np.array(embed_model.encode(query)).reshape(1, -1)
+    vectors = []
+    ids = []
+    for paper in embeddings:
+        vectors.append(np.array(paper.embedding, dtype=np.float32))
+        ids.append(paper.id)
 
-    # Ensure FAISS is loaded
-    if index.ntotal == 0:
-        print("⚠️ FAISS index is empty. Loading from DB...")
-        load_faiss_index(db)
+    if vectors:
+        index.add(np.vstack(vectors), np.array(ids, dtype=np.int64))
+        save_faiss_index()
 
-    if index.ntotal > 0:
-        distances, indices = index.search(query_embedding, top_k)
-        papers = db.query(PaperEmbedding).all()
-        results = [{"title": papers[i].title, "abstract": papers[i].abstract} for i in indices[0]]
-        return results
-    else:
-        return []
+def add_embedding_to_faiss(embedding: list, paper_id: int):
+    """Add a new embedding to the FAISS index."""
+    global index
+    vector = np.array(embedding, dtype=np.float32).reshape(1, -1)
+    index.add(vector, np.array([paper_id], dtype=np.int64))
+    save_faiss_index()
