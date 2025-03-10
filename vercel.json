@@ -13,10 +13,16 @@
     }
   ],
   "env": {
-"DATABASE_URL": "postgresql+psycopg2://postgres.ccputecuxrkdvnbmqnco:password@aws-0-eu-central-1.pooler.supabase.com:6543/postgres",
+    "DATABASE_URL": "postgresql+psycopg2://postgres.ccputecuxrkdvnbmqnco:password@aws-0-eu-central-1.pooler.supabase.com:6543/postgres",
     "SECRET_KEY": "",
     "ALGORITHM": "HS256",
     "ACCESS_TOKEN_EXPIRE_MINUTES": "90"
   },
-  "buildCommand": "pip install -r requirements.txt && alembic upgrade head"
+  "buildCommand": "pip install -r requirements.txt && alembic upgrade head",
+  "functions": {
+    "main.py": {
+      "runtime": "python3.9",
+      "memory": 512
+    }
+  }
 }
