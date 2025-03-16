@@ -9,9 +9,9 @@ from api.db.database import get_db, SessionLocal
 from api.v1.models.cache import CachedResult
 from api.utils.embeddings import (
     process_and_store_paper_embeddings,
-    extract_text_from_pdf,
+    extract_text_from_pdf_async,
     extract_text_from_webpage_async,
-    predict_custom_trained_model
+    predict_custom_trained_model,
 )
 from api.utils.embeddings import index
 from api.v1.models.embeddings import PaperEmbedding
@@ -19,6 +19,7 @@ import numpy as np
 import re
 import psutil
 from api.utils.embeddings import embedding_dim
+import xml.etree.ElementTree as ET
 
 # Load environment variables
 load_dotenv()
@@ -37,58 +38,86 @@ if not SERP_API_KEY:
 
 research = APIRouter(prefix="/research", tags=["Research"])
 
+import asyncio
+import httpx
+import xml.etree.ElementTree as ET
+
+
 # Paper Search Functions
 async def fetch_arxiv_results(query: str, max_results=5):
     """Fetch research papers from ArXiv, including abstract and metadata."""
     url = f"http://export.arxiv.org/api/query?search_query=all:{query}&start=0&max_results={max_results}"
-    
-    async with httpx.AsyncClient() as client:
-        response = await client.get(url)
 
-    if response.status_code == 200:
-        from xml.etree import ElementTree as ET
-        root = ET.fromstring(response.content)
-        
-        return [
-            {
-                "title": entry.find("{http://www.w3.org/2005/Atom}title").text,
-                "abstract": entry.find("{http://www.w3.org/2005/Atom}summary").text.strip(),  # Extract abstract
-                "link": entry.find("{http://www.w3.org/2005/Atom}id").text,
-            }
-            for entry in root.findall(".//{http://www.w3.org/2005/Atom}entry")
-        ]
-    return []
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.get(url, timeout=10)
+            response.raise_for_status()
+        except httpx.HTTPError as e:
+            print(f"❌ ArXiv API request failed: {e}")
+            return []
+
+    root = ET.fromstring(response.content)
+    results = []
+    for entry in root.iterfind(".//{http://www.w3.org/2005/Atom}entry"):
+        title = entry.find("{http://www.w3.org/2005/Atom}title").text
+        abstract = entry.find("{http://www.w3.org/2005/Atom}summary").text.strip()
+        link = entry.find("{http://www.w3.org/2005/Atom}id").text
+        results.append({"title": title, "abstract": abstract, "link": link})
+
+    return results
+
 
 async def fetch_google_results(query: str, max_results=5):
     """Fetch results from Google Custom Search API and extract abstracts."""
     if not GOOGLE_API_KEY or not GOOGLE_CX:
+        print("❌ Google API key or CX is missing.")
         return []
-    
+
     url = f"https://www.googleapis.com/customsearch/v1?q={query}&key={GOOGLE_API_KEY}&cx={GOOGLE_CX}"
+
     async with httpx.AsyncClient() as client:
-        response = await client.get(url)
+        try:
+            response = await client.get(url, timeout=10)
+            response.raise_for_status()
+        except httpx.HTTPError as e:
+            print(f"❌ Google API request failed: {e}")
+            return []
 
-    if response.status_code == 200:
-        data = response.json()
-        results = []
-        for item in data.get("items", [])[:max_results]:
-            title = item["title"]
-            link = item["link"]
+    data = response.json()
+    results = []
+    tasks = []
 
-            # Extract text from link
-            if link.endswith(".pdf"):
-                abstract = extract_text_from_pdf(link)
-            else:
-                abstract = extract_text_from_webpage_async(link)
+    for item in data.get("items", [])[:max_results]:
+        title = item["title"]
+        link = item["link"]
 
-            results.append({"title": title, "link": link, "abstract": abstract[:500]})  # Trim abstract
-        return results
-    
-    return []
+        if link.endswith(".pdf"):
+            tasks.append(extract_text_from_pdf_async(link))
+        else:
+            tasks.append(extract_text_from_webpage_async(link))
+
+    abstracts = await asyncio.gather(*tasks, return_exceptions=True)
+
+    for i, item in enumerate(data.get("items", [])[:max_results]):
+        results.append(
+            {
+                "title": item["title"],
+                "link": item["link"],
+                "abstract": (
+                    abstracts[i][:500]
+                    if isinstance(abstracts[i], str)
+                    else "Failed to retrieve abstract"
+                ),
+            }
+        )
+
+    return results
+
 
 async def fetch_serp_results(query: str, max_results=5):
     """Fetch results from SERP API and extract abstracts asynchronously."""
     if not SERP_API_KEY:
+        print("❌ SERP API key is missing.")
         return []
 
     url = f"https://serpapi.com/search.json?q={query}&api_key={SERP_API_KEY}"
@@ -96,30 +125,41 @@ async def fetch_serp_results(query: str, max_results=5):
     async with httpx.AsyncClient() as client:
         try:
             response = await client.get(url, timeout=10)
-            response.raise_for_status()  # Raise exception for HTTP errors
+            response.raise_for_status()
         except httpx.HTTPError as e:
             print(f"❌ SERP API request failed: {e}")
             return []
 
     data = response.json()
     results = []
+    tasks = []
 
-    async def process_result(item):
-        """Processes each search result asynchronously."""
+    for item in data.get("organic_results", [])[:max_results]:
         title = item.get("title", "Untitled")
         link = item.get("link", "")
 
         if link.endswith(".pdf"):
-            abstract = extract_text_from_pdf(link)  # Use existing function
+            tasks.append(extract_text_from_pdf_async(link))
         else:
-            abstract = await extract_text_from_webpage_async(link)
+            tasks.append(extract_text_from_webpage_async(link))
 
-        return {"title": title, "link": link, "abstract": abstract[:500]}  # Trim abstract
+    abstracts = await asyncio.gather(*tasks, return_exceptions=True)
 
-    tasks = [process_result(item) for item in data.get("organic_results", [])[:max_results]]
-    results = await asyncio.gather(*tasks)  # Run all tasks concurrently
+    for i, item in enumerate(data.get("organic_results", [])[:max_results]):
+        results.append(
+            {
+                "title": item.get("title", "Untitled"),
+                "link": item.get("link", ""),
+                "abstract": (
+                    abstracts[i][:500]
+                    if isinstance(abstracts[i], str)
+                    else "Failed to retrieve abstract"
+                ),
+            }
+        )
 
     return results
+
 
 def clean_text(text):
     """Cleans up text by removing unwanted phrases and excess whitespace."""

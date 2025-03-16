@@ -1,7 +1,7 @@
 from sqlalchemy.orm import Session
 import faiss
 import numpy as np
-import requests
+import httpx
 from bs4 import BeautifulSoup
 import fitz  # PyMuPDF
 from api.v1.models.embeddings import PaperEmbedding
@@ -197,20 +197,22 @@ async def extract_text_from_webpage_async(url: str) -> str:
     finally:
         await session.close()  # Ensures session is closed
 
-def extract_text_from_pdf(pdf_url: str) -> str:
-    """Extract text from a given PDF link."""
-    response = requests.get(pdf_url, stream=True, timeout=10)
-    if response.status_code == 200:
-        with open("temp.pdf", "wb") as f:
-            f.write(response.content)
-        
-        text = ""
-        with fitz.open("temp.pdf") as doc:
-            for page in doc:
-                text += page.get_text("text") + "\n"
-        return text.strip()
+async def extract_text_from_pdf_async(pdf_url: str) -> str:
+    """Asynchronously extract text from a given PDF link."""
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.get(pdf_url, timeout=10)
+            response.raise_for_status()
+        except httpx.HTTPError as e:
+            print(f"❌ Failed to download PDF: {e}")
+            return ""
     
-    return ""
+    text = ""
+    with fitz.open(stream=response.content, filetype="pdf") as doc:
+        for page in doc:
+            text += page.get_text("text") + "\n"
+    
+    return text.strip()
 
 def rebuild_faiss_index(db: Session):
     """Rebuild FAISS index from the database if necessary."""
