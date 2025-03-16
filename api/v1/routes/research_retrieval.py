@@ -8,7 +8,6 @@ from dotenv import load_dotenv
 from api.db.database import get_db, SessionLocal
 from api.v1.models.cache import CachedResult
 from api.utils.embeddings import (
-    save_faiss_index,
     process_and_store_paper_embeddings,
     extract_text_from_pdf,
     extract_text_from_webpage_async

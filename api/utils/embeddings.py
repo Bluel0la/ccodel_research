@@ -1,5 +1,4 @@
 from sqlalchemy.orm import Session
-from sentence_transformers import SentenceTransformer
 import faiss
 import numpy as np
 import requests
@@ -10,7 +9,6 @@ import os
 from requests_html import AsyncHTMLSession
 from typing import Dict, List, Union
 from google.cloud import aiplatform
-import asyncio
 from dotenv import load_dotenv
 from google.auth import load_credentials_from_file, default
 
@@ -32,11 +30,9 @@ except Exception as e:
 FAISS_INDEX_PATH = "faiss_index.bin"
 
 # Load embedding model
-embed_model = SentenceTransformer("sentence-transformers/all-mpnet-base-v2")
 embedding_dim = 768  # Make sure this matches the model output
 
 
-# Load FAISS index
 # Load FAISS index
 def load_faiss_index():
     """Load FAISS index from disk or initialize a new one."""
