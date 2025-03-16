@@ -1,31 +1,23 @@
 from sqlalchemy.orm import Session
 import faiss
 import numpy as np
-import httpx
+import requests
 from bs4 import BeautifulSoup
 import fitz  # PyMuPDF
 from api.v1.models.embeddings import PaperEmbedding
 import os
-from requests_html import AsyncHTMLSession
-from typing import Dict, List, Union
-from google.cloud import aiplatform
+import aiohttp
+import httpx
+import asyncio
+from endpoint_tester import predict_custom_trained_model
 from dotenv import load_dotenv
-from google.auth import load_credentials_from_file, default
 
 load_dotenv(".env")
-GOOGLE_APPLICATION_CREDENTIALS = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
 
-try:
-    if GOOGLE_APPLICATION_CREDENTIALS:
-        credentials, project = load_credentials_from_file(
-            GOOGLE_APPLICATION_CREDENTIALS
-        )
-    else:
-        credentials, project = default()
-        print("✅ Using default Google Cloud credentials")
-except Exception as e:
-    print(f"🚨 ERROR: Failed to load Google credentials → {e}")
-    exit(1)
+GCP_PROJECT = os.getenv("GCP_PROJECT")
+VERTEX_ENDPOINT_ID = os.getenv("VERTEX_ENDPOINT_ID")
+GCP_LOCATION = os.getenv("GCP_LOCATION")
+
 
 FAISS_INDEX_PATH = "faiss_index.bin"
 
@@ -68,43 +60,24 @@ def save_faiss_index():
 index = None
 load_faiss_index()
 
-# Google Cloud AI Model Prediction
-async def predict_custom_trained_model(
-    project: str,
-    endpoint_id: str,
-    instances: Union[Dict, List[Dict]],
-    location: str = "us-central1",
-    api_endpoint: str = "us-central1-aiplatform.googleapis.com",
-):
-    """Sends a prediction request to a Vertex AI custom model."""
-    
-    client_options = {"api_endpoint": api_endpoint}
-    client = aiplatform.gapic.PredictionServiceClient(client_options=client_options)
 
-    instances = instances if isinstance(instances, list) else [instances]
-    formatted_instances = [{"inputs": instance["text"]} for instance in instances]
-
-    endpoint = client.endpoint_path(
-        project=project, location=location, endpoint=endpoint_id
+async def fetch_embedding_from_vertex(text: str):
+    """Fetch embedding from Vertex AI using existing function."""
+    instances = {"text": text}
+    response = predict_custom_trained_model(
+        project=GCP_PROJECT,
+        endpoint_id=VERTEX_ENDPOINT_ID,
+        instances=instances,
+        location=GCP_LOCATION,
     )
 
-    try:
-        response = client.predict(endpoint=endpoint, instances=formatted_instances, parameters={})
-        predictions = response.predictions
+    if response:
+        return np.array(response[0], dtype=np.float32)  # Ensure correct format
+    return None
 
-        if not predictions:
-            print("🚨 ERROR: No predictions received.")
-            return None
 
-        return predictions  # Return raw predictions
-
-    except Exception as e:
-        print(f"🚨 ERROR: Failed to fetch embeddings → {e}")
-        return None
-
-# Function to Process Papers and Store Embeddings
 async def process_and_store_paper_embeddings(papers, db: Session):
-    """Fetch embeddings from the hosted model, store in DB, and update FAISS."""
+    """Generate embeddings via Vertex AI, store in DB, and update FAISS."""
 
     if not papers:
         print("⚠️ DEBUG: No papers provided for embedding.")
@@ -117,35 +90,17 @@ async def process_and_store_paper_embeddings(papers, db: Session):
         abstract = paper.get("abstract", "").strip()
         if not abstract:
             print(f"⚠️ DEBUG: Skipping {title} (no abstract available).")
-            continue  
+            continue
 
-        print(f"🛠️ DEBUG: Generating embedding for {title} using the hosted model...")
+        print(f"🛠️ DEBUG: Fetching embedding for {title} from Vertex AI...")
 
         # 1️⃣ Generate key findings
         key_findings = abstract.split(". ")[:2]
 
-        # 2️⃣ Fetch embedding from API
-        try:
-            embedding_response = await predict_custom_trained_model(
-                project="178740183321",
-                endpoint_id="3947058727227490304",
-                location="us-central1",
-                instances={"text": abstract}
-            )
-
-            if not embedding_response:
-                print(f"❌ DEBUG: No embedding received for {title}")
-                continue
-
-            # Extract the embedding vector from response
-            embedding = np.array(embedding_response[0], dtype=np.float32)  # Assuming first response is embedding
-
-            if embedding.shape[0] != embedding_dim:
-                print(f"❌ DEBUG: Embedding dimension mismatch for {title}")
-                continue
-
-        except Exception as e:
-            print(f"🚨 ERROR: Embedding generation failed for {title} → {e}")
+        # 2️⃣ Fetch embedding from Vertex AI
+        embedding = await fetch_embedding_from_vertex(abstract)
+        if embedding is None or embedding.shape[0] != embedding_dim:
+            print(f"❌ DEBUG: Embedding error for {title}")
             continue
 
         # 3️⃣ Store in DB
@@ -155,64 +110,83 @@ async def process_and_store_paper_embeddings(papers, db: Session):
                 abstract=abstract,
                 key_findings=key_findings,
                 link=paper.get("link", ""),
-                embedding=embedding.tolist()
+                embedding=embedding.tolist(),
             )
             db.add(new_paper)
             db.flush()  # Get ID before commit
             db.commit()
 
-            # 4️⃣ Update FAISS index
-            paper_id = new_paper.id  # Ensure ID is fetched
-            index.add_with_ids(np.array([embedding], dtype=np.float32), np.array([paper_id], dtype=np.int64))
 
-            print(f"✅ DEBUG: Successfully stored embedding for {title} (ID: {paper_id})")
+            # 4️⃣ Update FAISS index
+            paper_id = new_paper.id
+            index.add_with_ids(
+                np.array([embedding], dtype=np.float32),
+                np.array([paper_id], dtype=np.int64),
+            )
+
+            print(
+                f"✅ DEBUG: Successfully stored embedding for {title} (ID: {paper_id})"
+            )
 
         except Exception as e:
             print(f"🚨 ERROR: Failed to store embedding for {title} → {e}")
             continue
 
     print("💾 DEBUG: Database commit complete.")
-    save_faiss_index()  # Save after update
+    save_faiss_index()  # Save FAISS after update
+
 
 async def extract_text_from_webpage_async(url: str) -> str:
-    """Asynchronously extract text content from a webpage, including JavaScript-rendered content."""
-    session = AsyncHTMLSession()
-    
+    """Asynchronously extract text content from a webpage efficiently."""
+    headers = {"User-Agent": "Mozilla/5.0"}
+    async with aiohttp.ClientSession() as session:
+        try:
+            async with session.get(url, headers=headers, timeout=10) as response:
+                html_content = await response.text()
+
+                soup = BeautifulSoup(html_content, "html.parser")
+
+                # Remove unnecessary elements
+                for tag in soup(
+                    ["script", "style", "header", "footer", "nav", "aside", "form"]
+                ):
+                    tag.extract()
+
+                return soup.get_text(separator="\n").strip()
+        except Exception as e:
+            print(f"❌ Error extracting text from {url}: {e}")
+            return ""
+
+
+def extract_text_from_pdf(pdf_url: str) -> str:
+    """Extract text from a given PDF link without saving to disk."""
     try:
-        response = await session.get(url, timeout=15)  # Increased timeout
-        await response.html.arender(timeout=20, sleep=2)  # Render JavaScript with delay
+        response = requests.get(pdf_url, stream=True, timeout=10)
+        response.raise_for_status()
 
-        soup = BeautifulSoup(response.html.html, "html.parser")
+        text = ""
+        with fitz.open(stream=response.content, filetype="pdf") as doc:
+            for page in doc:
+                text += page.get_text("text") + "\n"
 
-        # Remove unnecessary elements
-        for tag in soup(["script", "style", "header", "footer", "nav", "aside", "form"]):
-            tag.extract()
-
-        return soup.get_text(separator="\n").strip()
-
+        return text.strip()
     except Exception as e:
-        print(f"❌ Error extracting text from {url}: {e}")
+        print(f"❌ Error extracting text from PDF: {e}")
         return ""
 
-    finally:
-        await session.close()  # Ensures session is closed
 
 async def extract_text_from_pdf_async(pdf_url: str) -> str:
-    """Asynchronously extract text from a given PDF link."""
-    async with httpx.AsyncClient() as client:
-        try:
+    """Extracts text from a given PDF link asynchronously."""
+    try:
+        async with httpx.AsyncClient() as client:
             response = await client.get(pdf_url, timeout=10)
             response.raise_for_status()
-        except httpx.HTTPError as e:
-            print(f"❌ Failed to download PDF: {e}")
-            return ""
-    
-    text = ""
-    with fitz.open(stream=response.content, filetype="pdf") as doc:
-        for page in doc:
-            text += page.get_text("text") + "\n"
-    
-    return text.strip()
+
+        return await asyncio.to_thread(extract_text_from_pdf, response.content)
+    except Exception as e:
+        print(f"❌ Error extracting text from PDF: {e}")
+        return ""
+
 
 def rebuild_faiss_index(db: Session):
     """Rebuild FAISS index from the database if necessary."""

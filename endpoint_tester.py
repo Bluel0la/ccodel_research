@@ -1,5 +1,13 @@
 from typing import Dict, List, Union
 from google.cloud import aiplatform
+from dotenv import load_dotenv
+import os
+
+load_dotenv(".env")
+GCP_PROJECT = os.getenv("GCP_PROJECT")
+VERTEX_ENDPOINT_ID = os.getenv("VERTEX_ENDPOINT_ID")
+GCP_LOCATION = os.getenv("GCP_LOCATION")
+
 
 def predict_custom_trained_model(
     project: str,
@@ -7,6 +15,7 @@ def predict_custom_trained_model(
     instances: Union[Dict, List[Dict]],
     location: str = "us-central1",
     api_endpoint: str = "us-central1-aiplatform.googleapis.com",
+    parameters: Dict = None,  # Allow optional parameters
 ):
     """
     Sends a prediction request to a Vertex AI custom model.
@@ -17,9 +26,10 @@ def predict_custom_trained_model(
         instances: A dictionary or list of dictionaries containing input data.
         location: Region of the model deployment.
         api_endpoint: API endpoint for the location.
+        parameters: Optional parameters for model inference.
 
     Returns:
-        Model prediction results.
+        Model prediction results or None if an error occurs.
     """
 
     # Set up API client
@@ -29,34 +39,42 @@ def predict_custom_trained_model(
     # Ensure instances are in list format
     instances = instances if isinstance(instances, list) else [instances]
 
-    # ✅ Ensure `inputs` field is used correctly
-    formatted_instances = [{"inputs": instance["text"]} for instance in instances]
+    # ✅ Handle missing 'text' keys safely
+    formatted_instances = [
+        {"inputs": instance.get("text", "")} for instance in instances
+    ]
 
-    # Define parameters (optional, can be adjusted)
-    parameters = {}
+    # Default to empty dict if parameters are None
+    parameters = parameters or {}
 
     # Construct the full endpoint path
     endpoint = client.endpoint_path(
         project=project, location=location, endpoint=endpoint_id
     )
 
-    # Send the request
-    response = client.predict(endpoint=endpoint, instances=formatted_instances, parameters=parameters)
+    # Send the request with error handling
+    try:
+        response = client.predict(
+            endpoint=endpoint, instances=formatted_instances, parameters=parameters
+        )
+        print("Response:")
+        print("Deployed Model ID:", response.deployed_model_id)
 
-    # Print results
-    print("Response:")
-    print("Deployed Model ID:", response.deployed_model_id)
+        predictions = response.predictions
+        for prediction in predictions:
+            print("Prediction:", prediction)
 
-    predictions = response.predictions
-    for prediction in predictions:
-        print("Prediction:", prediction)
+        return predictions  # Return predictions for further processing
 
-    return predictions  # Return predictions for further processing
+    except Exception as e:
+        print(f"Error during prediction: {e}")
+        return None
+
 
 # Example usage
 predict_custom_trained_model(
-    project="178740183321",
-    endpoint_id="3947058727227490304",
-    location="us-central1",
-    instances={"text": "Hello, how are you?"}  # ✅ Ensured correct format
+    project=GCP_PROJECT,
+    endpoint_id=VERTEX_ENDPOINT_ID,
+    location=GCP_LOCATION,
+    instances={"text": "Hello, how are you?"},  # ✅ Handled safely
 )
