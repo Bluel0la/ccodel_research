@@ -10,13 +10,15 @@ from api.v1.models.cache import CachedResult
 from api.utils.embeddings import (
     process_and_store_paper_embeddings,
     extract_text_from_pdf,
-    extract_text_from_webpage_async
+    extract_text_from_webpage_async,
+    predict_custom_trained_model
 )
-from api.utils.embeddings import embed_model, index
+from api.utils.embeddings import index
 from api.v1.models.embeddings import PaperEmbedding
 import numpy as np
 import re
 import psutil
+from api.utils.embeddings import embedding_dim
 
 # Load environment variables
 load_dotenv()
@@ -177,11 +179,33 @@ async def search_papers(query: str, db: Session = Depends(get_db)):
 
     return {"query": query, "results": combined_results, "cached": False}
 
+
 @research.get("/faiss-search/")
 async def faiss_search(query: str, top_k: int = 5, db: Session = Depends(get_db)):
     """Fast FAISS search for research papers"""
     try:
-        query_embedding = embed_model.encode(query).tolist()
+        # 🛠️ Fetch query embedding from hosted model API
+        embedding_response = await predict_custom_trained_model(
+            project="178740183321",
+            endpoint_id="3947058727227490304",
+            location="us-central1",
+            instances={"text": query},
+        )
+
+        if not embedding_response:
+            print("❌ DEBUG: No embedding received for query")
+            return {"error": "Failed to generate embedding for query"}
+
+        # Extract the embedding vector
+        query_embedding = np.array(
+            embedding_response[0], dtype=np.float32
+        )  # First response is embedding
+
+        if query_embedding.shape[0] != embedding_dim:
+            print(f"❌ DEBUG: Query embedding dimension mismatch")
+            return {"error": "Embedding dimension mismatch"}
+
+        # 🔍 Search FAISS index with retrieved embedding
         D, I = index.search(np.array([query_embedding]), top_k)
 
         # Convert numpy.int64 indices to Python int and remove invalid indices (-1)
@@ -191,7 +215,9 @@ async def faiss_search(query: str, top_k: int = 5, db: Session = Depends(get_db)
             return {"query": query, "results": []}
 
         # Fetch all matching papers in one batch query
-        papers = db.query(PaperEmbedding).filter(PaperEmbedding.id.in_(valid_indices)).all()
+        papers = (
+            db.query(PaperEmbedding).filter(PaperEmbedding.id.in_(valid_indices)).all()
+        )
 
         # Create a dictionary of papers for fast lookup
         paper_dict = {paper.id: paper for paper in papers}
@@ -203,9 +229,10 @@ async def faiss_search(query: str, top_k: int = 5, db: Session = Depends(get_db)
                 "abstract": paper_dict[idx].abstract,
                 "key_findings": paper_dict[idx].key_findings,
                 "link": paper_dict[idx].link,
-                "similarity_score": float(score)
+                "similarity_score": float(score),
             }
-            for idx, score in zip(I[0], D[0]) if idx in paper_dict
+            for idx, score in zip(I[0], D[0])
+            if idx in paper_dict
         ]
 
         # Sort results by similarity score (descending)
@@ -213,11 +240,15 @@ async def faiss_search(query: str, top_k: int = 5, db: Session = Depends(get_db)
 
         return {"query": query, "results": results}
 
+    except Exception as e:
+        print(f"🚨 ERROR: Query embedding retrieval failed → {e}")
+        return {"error": "Failed to process query embedding"}
+
     finally:
         # Cleanup multiprocessing processes
         for proc in psutil.process_iter():
             try:
-                if proc.name() == "python":
-                    proc.terminate()  # Terminate any lingering Python processes
+                if "faiss" in proc.name().lower():
+                    proc.terminate()
             except psutil.NoSuchProcess:
                 pass
