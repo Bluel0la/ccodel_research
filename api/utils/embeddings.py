@@ -11,8 +11,22 @@ import httpx
 import asyncio
 from endpoint_tester import predict_custom_trained_model
 from dotenv import load_dotenv
+from google.auth import load_credentials_from_file, default
 
 load_dotenv(".env")
+GOOGLE_APPLICATION_CREDENTIALS = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+
+try:
+    if GOOGLE_APPLICATION_CREDENTIALS:
+        credentials, project = load_credentials_from_file(
+            GOOGLE_APPLICATION_CREDENTIALS
+        )
+    else:
+        credentials, project = default()
+        print("✅ Using default Google Cloud credentials")
+except Exception as e:
+    print(f"🚨 ERROR: Failed to load Google credentials → {e}")
+    exit(1)
 
 GCP_PROJECT = os.getenv("GCP_PROJECT")
 VERTEX_ENDPOINT_ID = os.getenv("VERTEX_ENDPOINT_ID")
