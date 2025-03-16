@@ -8,29 +8,61 @@ import fitz  # PyMuPDF
 from api.v1.models.embeddings import PaperEmbedding
 import os
 from requests_html import AsyncHTMLSession
+from typing import Dict, List, Union
+from google.cloud import aiplatform
+import asyncio
+from dotenv import load_dotenv
+from google.auth import load_credentials_from_file, default
+
+load_dotenv(".env")
+GOOGLE_APPLICATION_CREDENTIALS = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+
+try:
+    if GOOGLE_APPLICATION_CREDENTIALS:
+        credentials, project = load_credentials_from_file(
+            GOOGLE_APPLICATION_CREDENTIALS
+        )
+    else:
+        credentials, project = default()
+        print("✅ Using default Google Cloud credentials")
+except Exception as e:
+    print(f"🚨 ERROR: Failed to load Google credentials → {e}")
+    exit(1)
+
 FAISS_INDEX_PATH = "faiss_index.bin"
 
 # Load embedding model
 embed_model = SentenceTransformer("sentence-transformers/all-mpnet-base-v2")
 embedding_dim = 768  # Make sure this matches the model output
 
+
+# Load FAISS index
 # Load FAISS index
 def load_faiss_index():
     """Load FAISS index from disk or initialize a new one."""
     global index
     if os.path.exists(FAISS_INDEX_PATH):
-        print("🔄 Loading FAISS index from disk...")
-        index = faiss.read_index(FAISS_INDEX_PATH)
+        try:
+            print("Loading FAISS Index from the disk...")
+            index = faiss.read_index(FAISS_INDEX_PATH)
 
-        # Ensure the index is wrapped with IndexIDMap for add_with_ids()
-        if not isinstance(index, faiss.IndexIDMap):
-            print("⚠️ Index is not ID-mapped. Wrapping it in IndexIDMap...")
-            index = faiss.IndexIDMap(index)
+            # Ensure the index is wrapped properly
+            if not isinstance(index, faiss.IndexIDMap):
+                print("⚠️ Index is not ID-mapped. Wrapping it in IndexIDMap...")
+                index = faiss.IndexIDMap(index)
+
+        except Exception as e:
+            print(f"🚨 ERROR: Failed to load FAISS index, reinitializing → {e}")
+            base_index = faiss.IndexFlatIP(embedding_dim)
+            index = faiss.IndexIDMap(base_index)
+            save_faiss_index()  # Ensure the new index is saved
+
     else:
         print("🚀 No saved FAISS index found. Creating a new one...")
-        base_index = faiss.IndexFlatIP(embedding_dim)  # Use IndexFlatIP for cosine similarity
-        index = faiss.IndexIDMap(base_index)  # Use IndexIDMap to support IDs
-        
+        base_index = faiss.IndexFlatIP(embedding_dim)
+        index = faiss.IndexIDMap(base_index)
+
+
 # Save FAISS index
 def save_faiss_index():
     """Save FAISS index to disk."""
@@ -40,9 +72,44 @@ def save_faiss_index():
 index = None
 load_faiss_index()
 
-async def process_and_store_paper_embeddings(papers, db: Session):
-    """Generate embeddings, store in DB, and update FAISS."""
+# Google Cloud AI Model Prediction
+async def predict_custom_trained_model(
+    project: str,
+    endpoint_id: str,
+    instances: Union[Dict, List[Dict]],
+    location: str = "us-central1",
+    api_endpoint: str = "us-central1-aiplatform.googleapis.com",
+):
+    """Sends a prediction request to a Vertex AI custom model."""
     
+    client_options = {"api_endpoint": api_endpoint}
+    client = aiplatform.gapic.PredictionServiceClient(client_options=client_options)
+
+    instances = instances if isinstance(instances, list) else [instances]
+    formatted_instances = [{"inputs": instance["text"]} for instance in instances]
+
+    endpoint = client.endpoint_path(
+        project=project, location=location, endpoint=endpoint_id
+    )
+
+    try:
+        response = client.predict(endpoint=endpoint, instances=formatted_instances, parameters={})
+        predictions = response.predictions
+
+        if not predictions:
+            print("🚨 ERROR: No predictions received.")
+            return None
+
+        return predictions  # Return raw predictions
+
+    except Exception as e:
+        print(f"🚨 ERROR: Failed to fetch embeddings → {e}")
+        return None
+
+# Function to Process Papers and Store Embeddings
+async def process_and_store_paper_embeddings(papers, db: Session):
+    """Fetch embeddings from the hosted model, store in DB, and update FAISS."""
+
     if not papers:
         print("⚠️ DEBUG: No papers provided for embedding.")
         return
@@ -56,18 +123,31 @@ async def process_and_store_paper_embeddings(papers, db: Session):
             print(f"⚠️ DEBUG: Skipping {title} (no abstract available).")
             continue  
 
-        print(f"🛠️ DEBUG: Generating embedding for {title}...")
+        print(f"🛠️ DEBUG: Generating embedding for {title} using the hosted model...")
 
         # 1️⃣ Generate key findings
         key_findings = abstract.split(". ")[:2]
 
-        # 2️⃣ Generate embedding
+        # 2️⃣ Fetch embedding from API
         try:
-            embedding = embed_model.encode(abstract, normalize_embeddings=True)  # Normalize embeddings
-            embedding = embedding.astype(np.float32)
+            embedding_response = await predict_custom_trained_model(
+                project="178740183321",
+                endpoint_id="3947058727227490304",
+                location="us-central1",
+                instances={"text": abstract}
+            )
+
+            if not embedding_response:
+                print(f"❌ DEBUG: No embedding received for {title}")
+                continue
+
+            # Extract the embedding vector from response
+            embedding = np.array(embedding_response[0], dtype=np.float32)  # Assuming first response is embedding
+
             if embedding.shape[0] != embedding_dim:
                 print(f"❌ DEBUG: Embedding dimension mismatch for {title}")
                 continue
+
         except Exception as e:
             print(f"🚨 ERROR: Embedding generation failed for {title} → {e}")
             continue
@@ -83,6 +163,7 @@ async def process_and_store_paper_embeddings(papers, db: Session):
             )
             db.add(new_paper)
             db.flush()  # Get ID before commit
+            db.commit()
 
             # 4️⃣ Update FAISS index
             paper_id = new_paper.id  # Ensure ID is fetched
@@ -94,7 +175,6 @@ async def process_and_store_paper_embeddings(papers, db: Session):
             print(f"🚨 ERROR: Failed to store embedding for {title} → {e}")
             continue
 
-    db.commit()
     print("💾 DEBUG: Database commit complete.")
     save_faiss_index()  # Save after update
 
@@ -120,7 +200,7 @@ async def extract_text_from_webpage_async(url: str) -> str:
 
     finally:
         await session.close()  # Ensures session is closed
-        
+
 def extract_text_from_pdf(pdf_url: str) -> str:
     """Extract text from a given PDF link."""
     response = requests.get(pdf_url, stream=True, timeout=10)
@@ -152,11 +232,3 @@ def rebuild_faiss_index(db: Session):
     if vectors:
         index.add_with_ids(np.vstack(vectors), np.array(ids, dtype=np.int64))
         save_faiss_index()
-
-def add_embedding_to_faiss(embedding: list, paper_id: int):
-    """Add a new embedding to the FAISS index."""
-    global index
-    vector = np.array(embedding, dtype=np.float32)
-    vector = vector / np.linalg.norm(vector)  # Normalize before adding
-    index.add_with_ids(vector.reshape(1, -1), np.array([paper_id], dtype=np.int64))
-    save_faiss_index()

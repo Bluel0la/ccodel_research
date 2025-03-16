@@ -1,0 +1,13 @@
+{
+  "type": "service_account",
+  "project_id": "corded-cable-453311-a8",
+  "private_key_id": "cde4c9721f7d4efaa880f27337c9360c0c3fe9ec",
+  "private_key": "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQDqW03TdffLPrQU\nJEwFFVaGCqtgYdFWBNGWI1FiFSpVvvkngr91krWKckNNQ32k4jUYac3w+oREKb4j\nTkqbdAqw71aXoto2Q5AVjco1yO9H4g2I/QZC1sbX9Ps6QaTchEtaFMHVXJ6xEKi6\nz1eWnNOY2tsTgGnAchZYTU+jXRaaUphFK+2q8hLNbWMyfxIipb/MWqm4CIrYdtJ1\nxfeDBswSrjTPVEDwji6QOxroCEMFBymo1rtzWm5vDaj9DHfsBD2m73p8oTzxV6aF\nLZ+lnAsx17BRRkIuGdtBxVaFVE6MGZXEQ1JwQ3Po11pbmK/srmKCb13oyVn7+MV0\nq6YIxJUHAgMBAAECggEAGRnxcopKobLUH+opWEwKSe4foAGqJc/7UNz0jRBeSfPc\nBO7cqe+uUSde7QojDYOLE1PV0o9KlnBwJKDwncjmkj/4YuJ3A+PlrWFT/MHKW0Ur\nlPYg8wzFHIFpXTqFuXbUCVB62GsEtktl/yhRJdkjUtZyK5sP+KRfn1Kcio9gaePl\nWyoDCE/SAH0UvWYhEm6O2UgW6NZhbihxNiIkrXyni44ZD2HcvsOXYc6/lFqLYJRG\n+wROY2lVChZ2xjH6CWrgkMjBDIH8dUzovoWYKBEjc3DzQZ2d/Rseo5d1WqqoMdvr\neDglPwjMtCLczVFT1UmGPk7mVU8MosUg8bDK20x21QKBgQD80nkPSggDLA5k8/Fs\nEW7/f5Nqv8SfFKAd/9EDZBp72QTDLs9NZ24JjPtq4Qn4b5HYrQjfCnTyzl8d4o9r\nc0mRTxEOeEq2cLO74Mw/u97TjMBKbSzEejv10XnlfJrVCDOJRbR17bjaKbHhJdpd\nC0qlx3TXMAhINxEHZKxl2/aRDQKBgQDtTWnB+ZnC4vWDmNbTlFF0gNKwxs04WalS\nrrDjuQz9OwGM/5Su8xOOog1KWH+24GFBeSP4Pxy34PWzeELxnYxyxQxAm7kWHDm2\n/C/4QohMigjNiS9VKIL3z84+GXINtbZVkyjIl0EtmQPHEQN7uPMisBr6sCt44D97\nJZ10gYMxYwKBgD6tEvP2X2wh5OOkEiq/W6wdfXdOWTkyzMsDG1bi3ynq0CJvHVdM\nF9xoRf/mECm1xwtXQkbA+eMjxDLNcs6pgwhx+IGE0sjNwdEG1rvKIGCDmTwaOqnu\nv6SeLMD2lg/P+67BSA6gQ15aTc3KK4s7fGMCwnWCY9s7Q454p8CMumCVAoGBAMmc\ne73R0lFBglXMBLi9ynaw/FA0lybJBpK42JChJ+f9udORUUFSQ8tq4t/HULqO6BI4\nWdcPx9Zxyk4wXq/oqurXfxFlPFsMn/xXRmomHKbqn5AAfbZcNOlWJGOeOshrGf6a\niIvj9fxHhG4chlkXSXqvJDzYcBbCbyyxSJUzc8MBAoGAG0Hq6W83N7yR40lTzvsE\nequITty4RY1CEzEezcqV0o+uxdH9kBIs4ql9kayL28aw5NDKha4zqvPbXKmycpRx\n9PjsCR9P/xlaPvjbbUvN6yQ8365fSORVP7SobTQMr3HT+HMrbjg6Du0v91KT8xnA\nJwWUwrlCH0o6mOPP7HN9nac=\n-----END PRIVATE KEY-----\n",
+  "client_email": "ccodel-tickets@corded-cable-453311-a8.iam.gserviceaccount.com",
+  "client_id": "117958569558377828492",
+  "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+  "token_uri": "https://oauth2.googleapis.com/token",
+  "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+  "client_x509_cert_url": "https://www.googleapis.com/robot/v1/metadata/x509/ccodel-tickets%40corded-cable-453311-a8.iam.gserviceaccount.com",
+  "universe_domain": "googleapis.com"
+}
