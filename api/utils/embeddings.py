@@ -12,6 +12,7 @@ import asyncio
 from endpoint_tester import predict_custom_trained_model
 from dotenv import load_dotenv
 from google.auth import load_credentials_from_file, default
+import io
 load_dotenv(".env")
 
 MAX_TOKENS = 255  # Vertex AI limit
@@ -131,6 +132,15 @@ async def process_and_store_paper_embeddings(papers, db: Session):
 
         # 2️⃣ Fetch embedding from Vertex AI
         embedding = await fetch_embedding_from_vertex(abstract)
+
+        if embedding is None:
+            print(f"❌ DEBUG: No embedding received for {title}")
+        elif not hasattr(embedding, "shape"):
+            print(f"❌ DEBUG: Embedding received but not a NumPy array: {type(embedding)}, value: {embedding}")
+        elif embedding.shape[0] != embedding_dim:
+            print(f"❌ DEBUG: Incorrect embedding shape {embedding.shape}, expected ({embedding_dim},)")
+        else:
+            print(f"✅ DEBUG: Successfully fetched embedding for {title}, shape: {embedding.shape}")
         if embedding is None or embedding.shape[0] != embedding_dim:
             print(f"❌ DEBUG: Embedding error for {title}")
             continue
@@ -147,7 +157,6 @@ async def process_and_store_paper_embeddings(papers, db: Session):
             db.add(new_paper)
             db.flush()  # Get ID before commit
             db.commit()
-
 
             # 4️⃣ Update FAISS index
             paper_id = new_paper.id
@@ -168,26 +177,38 @@ async def process_and_store_paper_embeddings(papers, db: Session):
     save_faiss_index()  # Save FAISS after update
 
 
-async def extract_text_from_webpage_async(url: str) -> str:
-    """Asynchronously extract text content from a webpage efficiently."""
+async def extract_text_from_webpage_async(url: str, max_retries=3) -> str:
+    """Asynchronously extract text from a webpage with retries."""
     headers = {"User-Agent": "Mozilla/5.0"}
-    async with aiohttp.ClientSession() as session:
+
+    for attempt in range(max_retries):
         try:
-            async with session.get(url, headers=headers, timeout=10) as response:
-                html_content = await response.text()
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, headers=headers, timeout=10) as response:
+                    if response.status != 200:
+                        print(
+                            f"⚠️ HTTP {response.status} - Retrying... ({attempt+1}/{max_retries})"
+                        )
+                        await asyncio.sleep(2 * attempt)  # Exponential backoff
+                        continue
 
-                soup = BeautifulSoup(html_content, "html.parser")
+                    html_content = await response.text()
+                    soup = BeautifulSoup(html_content, "html.parser")
 
-                # Remove unnecessary elements
-                for tag in soup(
-                    ["script", "style", "header", "footer", "nav", "aside", "form"]
-                ):
-                    tag.extract()
+                    # Remove unnecessary elements
+                    for tag in soup(
+                        ["script", "style", "header", "footer", "nav", "aside", "form"]
+                    ):
+                        tag.extract()
 
-                return soup.get_text(separator="\n").strip()
-        except Exception as e:
-            print(f"❌ Error extracting text from {url}: {e}")
-            return ""
+                    return soup.get_text(separator="\n").strip()
+
+        except (aiohttp.ClientError, asyncio.TimeoutError, ConnectionResetError) as e:
+            print(f"⚠️ Error fetching {url}: {e} - Retrying ({attempt+1}/{max_retries})")
+            await asyncio.sleep(2 * attempt)  # Exponential backoff
+
+    print(f"❌ Error extracting text from {url} after {max_retries} attempts.")
+    return ""
 
 
 def extract_text_from_pdf(pdf_url: str) -> str:
@@ -196,8 +217,11 @@ def extract_text_from_pdf(pdf_url: str) -> str:
         response = requests.get(pdf_url, stream=True, timeout=10)
         response.raise_for_status()
 
+        # Convert content to a file-like BytesIO object
+        pdf_stream = io.BytesIO(response.content)
+
         text = ""
-        with fitz.open(stream=response.content, filetype="pdf") as doc:
+        with fitz.open(pdf_stream) as doc:  # Open PDF from BytesIO
             for page in doc:
                 text += page.get_text("text") + "\n"
 
