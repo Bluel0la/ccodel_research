@@ -12,11 +12,9 @@ import asyncio
 from endpoint_tester import predict_custom_trained_model
 from dotenv import load_dotenv
 from google.auth import load_credentials_from_file, default
-from transformers import AutoTokenizer
-
-tokenizer = AutoTokenizer.from_pretrained("sentence-transformers/all-MiniLM-L6-v2")
-
 load_dotenv(".env")
+
+MAX_TOKENS = 255  # Vertex AI limit
 GOOGLE_APPLICATION_CREDENTIALS = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
 
 try:
@@ -34,9 +32,11 @@ except Exception as e:
 GCP_PROJECT = os.getenv("GCP_PROJECT")
 VERTEX_ENDPOINT_ID = os.getenv("VERTEX_ENDPOINT_ID")
 GCP_LOCATION = os.getenv("GCP_LOCATION")
-
-
 FAISS_INDEX_PATH = "faiss_index.bin"
+
+def chunk_text(text, chunk_size=1000):
+    """Split text into smaller chunks based on character length."""
+    return [text[i : i + chunk_size] for i in range(0, len(text), chunk_size)]
 
 # Load embedding model
 embedding_dim = 768  # Make sure this matches the model output
@@ -79,35 +79,31 @@ load_faiss_index()
 
 
 async def fetch_embedding_from_vertex(text: str):
-    """Fetch embedding from Vertex AI using existing function with batching."""
+    """Fetch embeddings for text, splitting into batches if necessary."""
 
-    max_length = 255  # Token limit per chunk
-    tokens = tokenizer(text, return_tensors="pt", truncation=False)["input_ids"][
-        0
-    ].tolist()
-    chunks = [tokens[i : i + max_length] for i in range(0, len(tokens), max_length)]
-
-    # Convert tokens back to text
-    text_chunks = [tokenizer.decode(chunk) for chunk in chunks]
+    text_chunks = chunk_text(text)  # Split into chunks
 
     embeddings = []
     for chunk in text_chunks:
-        instances = {"text": chunk}
-        response = predict_custom_trained_model(
-            project=GCP_PROJECT,
-            endpoint_id=VERTEX_ENDPOINT_ID,
-            instances=instances,
-            location=GCP_LOCATION,
-        )
+        instances = {"text": chunk}  # Send each chunk separately
 
-        if response:
-            embeddings.append(
-                np.array(response[0], dtype=np.float32)
-            )  # Ensure correct format
+        try:
+            response = predict_custom_trained_model(
+                project=GCP_PROJECT,
+                endpoint_id=VERTEX_ENDPOINT_ID,
+                instances=instances,
+                location=GCP_LOCATION,
+            )
 
-    # Concatenate embeddings
+            if response:
+                embeddings.append(np.array(response[0], dtype=np.float32))
+
+        except Exception as e:
+            print(f"🚨 ERROR: Vertex AI request failed → {e}")
+            return None
+
     if embeddings:
-        return np.concatenate(embeddings, axis=0)  # Flattened representation
+        return np.mean(embeddings, axis=0)  # Take the mean to combine embeddings
 
     return None  # Return None if no embeddings were retrieved
 
