@@ -12,6 +12,9 @@ import asyncio
 from endpoint_tester import predict_custom_trained_model
 from dotenv import load_dotenv
 from google.auth import load_credentials_from_file, default
+from transformers import AutoTokenizer
+
+tokenizer = AutoTokenizer.from_pretrained("sentence-transformers/all-MiniLM-L6-v2")
 
 load_dotenv(".env")
 GOOGLE_APPLICATION_CREDENTIALS = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
@@ -76,18 +79,37 @@ load_faiss_index()
 
 
 async def fetch_embedding_from_vertex(text: str):
-    """Fetch embedding from Vertex AI using existing function."""
-    instances = {"text": text}
-    response = predict_custom_trained_model(
-        project=GCP_PROJECT,
-        endpoint_id=VERTEX_ENDPOINT_ID,
-        instances=instances,
-        location=GCP_LOCATION,
-    )
+    """Fetch embedding from Vertex AI using existing function with batching."""
 
-    if response:
-        return np.array(response[0], dtype=np.float32)  # Ensure correct format
-    return None
+    max_length = 255  # Token limit per chunk
+    tokens = tokenizer(text, return_tensors="pt", truncation=False)["input_ids"][
+        0
+    ].tolist()
+    chunks = [tokens[i : i + max_length] for i in range(0, len(tokens), max_length)]
+
+    # Convert tokens back to text
+    text_chunks = [tokenizer.decode(chunk) for chunk in chunks]
+
+    embeddings = []
+    for chunk in text_chunks:
+        instances = {"text": chunk}
+        response = predict_custom_trained_model(
+            project=GCP_PROJECT,
+            endpoint_id=VERTEX_ENDPOINT_ID,
+            instances=instances,
+            location=GCP_LOCATION,
+        )
+
+        if response:
+            embeddings.append(
+                np.array(response[0], dtype=np.float32)
+            )  # Ensure correct format
+
+    # Concatenate embeddings
+    if embeddings:
+        return np.concatenate(embeddings, axis=0)  # Flattened representation
+
+    return None  # Return None if no embeddings were retrieved
 
 
 async def process_and_store_paper_embeddings(papers, db: Session):
