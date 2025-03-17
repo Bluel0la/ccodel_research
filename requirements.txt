@@ -10,6 +10,7 @@ cachetools==5.5.2
 certifi==2025.1.31
 charset-normalizer==3.4.1
 click==8.1.8
+python-jose
 dnspython==2.7.0
 docstring_parser==0.16
 dotenv==0.9.9
@@ -42,7 +43,6 @@ httpx==0.28.1
 huggingface-hub==0.29.3
 idna==3.10
 Jinja2==3.1.6
-jose==1.0.0
 markdown-it-py==3.0.0
 MarkupSafe==3.0.2
 mdurl==0.1.2
