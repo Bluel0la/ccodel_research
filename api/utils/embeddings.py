@@ -15,6 +15,7 @@ from google.auth import load_credentials_from_file, default
 import io
 import chardet
 from api.db.database import get_db  # Ensure this function is correctly implemented
+from playwright.async_api import async_playwright
 
 db = next(get_db())  # Get a database session
 
@@ -232,7 +233,7 @@ async def process_and_store_paper_embeddings(papers, db: Session):
 
 
 async def extract_text_from_webpage_async(url: str, max_retries=3) -> str:
-    """Asynchronously extract text from a webpage with retries."""
+    """Asynchronously extract text from a webpage, handling JS-heavy sites & captchas."""
     headers = {"User-Agent": "Mozilla/5.0"}
 
     for attempt in range(max_retries):
@@ -249,13 +250,37 @@ async def extract_text_from_webpage_async(url: str, max_retries=3) -> str:
                     html_content = await response.text()
                     soup = BeautifulSoup(html_content, "html.parser")
 
-                    # Remove unnecessary elements
+                    # ✅ CAPTCHA DETECTION: If page says "Please enable JavaScript", it's likely a bot trap
+                    if (
+                        "Please enable JavaScript" in html_content
+                        or "support ID" in html_content
+                    ):
+                        print(f"⚠️ CAPTCHA detected on {url}. Skipping...")
+                        return ""
+
+                    # ✅ REMOVE UNNECESSARY ELEMENTS (script, style, ads, navigation, etc.)
                     for tag in soup(
                         ["script", "style", "header", "footer", "nav", "aside", "form"]
                     ):
                         tag.extract()
 
-                    return soup.get_text(separator="\n").strip()
+                    # ✅ TARGET SPECIFIC ABSTRACT SECTIONS
+                    abstract = None
+
+                    # Check common places for abstracts
+                    meta_description = soup.find("meta", attrs={"name": "description"})
+                    if meta_description:
+                        abstract = meta_description.get("content", "").strip()
+
+                    elif soup.find("p"):  # Try first paragraph as a fallback
+                        abstract = soup.find("p").get_text(strip=True)
+
+                    if abstract:
+                        return abstract
+
+                    # ❗ If no useful text was found, consider using Playwright as a fallback
+                    print(f"⚠️ No useful text extracted. Trying JavaScript rendering...")
+                    return await extract_text_with_playwright(url)
 
         except (aiohttp.ClientError, asyncio.TimeoutError, ConnectionResetError) as e:
             print(f"⚠️ Error fetching {url}: {e} - Retrying ({attempt+1}/{max_retries})")
@@ -263,6 +288,41 @@ async def extract_text_from_webpage_async(url: str, max_retries=3) -> str:
 
     print(f"❌ Error extracting text from {url} after {max_retries} attempts.")
     return ""
+
+
+# ✅ PLAYWRIGHT FALLBACK FOR JAVASCRIPT-PROTECTED PAGES
+async def extract_text_with_playwright(url: str) -> str:
+    """Use Playwright to render JavaScript-heavy pages and extract text."""
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        page = await browser.new_page()
+
+        try:
+            await page.goto(url, timeout=30000)  # Wait for full page load
+            html_content = await page.content()  # Get rendered HTML
+            soup = BeautifulSoup(html_content, "html.parser")
+
+            # Remove unnecessary elements
+            for tag in soup(
+                ["script", "style", "header", "footer", "nav", "aside", "form"]
+            ):
+                tag.extract()
+
+            # Extract abstract
+            abstract = None
+            meta_description = soup.find("meta", attrs={"name": "description"})
+            if meta_description:
+                abstract = meta_description.get("content", "").strip()
+            elif soup.find("p"):
+                abstract = soup.find("p").get_text(strip=True)
+
+            await browser.close()
+            return abstract if abstract else ""
+
+        except Exception as e:
+            print(f"🚨 Playwright failed on {url}: {e}")
+            await browser.close()
+            return ""
 
 
 def extract_text_from_pdf(pdf_url: str) -> str:
