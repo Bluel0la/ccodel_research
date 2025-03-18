@@ -55,23 +55,25 @@ def rebuild_faiss_index(db: Session):
 
     # ✅ Step 1: Fetch all embeddings from the database
     papers = db.query(PaperEmbedding.id, PaperEmbedding.embedding).all()
-    print(f"📌 DEBUG: Retrieved {len(papers)} embeddings from DB")  # Add this debug
+    print(f"📌 DEBUG: Retrieved {len(papers)} embeddings from DB")
 
     if not papers:
         print("⚠️ No embeddings found in database. FAISS index will be empty.")
         return None
 
     # ✅ Step 2: Convert to NumPy arrays
-    ids = np.array([paper.id for paper in papers], dtype=np.int64)
+    ids = np.array([paper.id for paper in papers], dtype=np.int64)  # Ensure int64
     embeddings = np.array([paper.embedding for paper in papers], dtype=np.float32)
-    print(f"📌 DEBUG: NumPy array shape: {embeddings.shape}")  # Add this debug
+    print(f"📌 DEBUG: NumPy array shape: {embeddings.shape}")
 
-    # ✅ Step 3: Create a new FAISS index
-    index = faiss.IndexFlatL2(embeddings.shape[1])  # Ensure embedding_dim is correct
+    # ✅ Step 3: Create an ID-mapped FAISS index
+    dimension = embeddings.shape[1]
+    base_index = faiss.IndexFlatL2(dimension)  # Base index
+    index = faiss.IndexIDMap(base_index)  # ✅ Wrap with IndexIDMap
 
-    # ✅ Step 4: Add embeddings to the FAISS index
-    index.add(embeddings)
-    print(f"✅ FAISS index built with {index.ntotal} vectors")  # Add this debug
+    # ✅ Step 4: Add embeddings with IDs
+    index.add_with_ids(embeddings, ids)
+    print(f"✅ FAISS index built with {index.ntotal} vectors")
 
     # ✅ Step 5: Save index to disk
     faiss.write_index(index, FAISS_INDEX_PATH)
@@ -80,41 +82,36 @@ def rebuild_faiss_index(db: Session):
     return index
 
 
-# Load FAISS index
+# ✅ Load FAISS Index with Proper ID Handling
 def load_faiss_index():
     """Load FAISS index from disk or rebuild it from the database if not found."""
     global index
+
     if os.path.exists(FAISS_INDEX_PATH):
         try:
             print("📂 Loading FAISS Index from disk...")
             index = faiss.read_index(FAISS_INDEX_PATH)
 
-            # Ensure the index is wrapped properly
+            # ✅ Ensure the index is properly wrapped
             if not isinstance(index, faiss.IndexIDMap):
                 print("⚠️ Index is not ID-mapped. Wrapping it in IndexIDMap...")
                 index = faiss.IndexIDMap(index)
 
-            print(
-                f"📌 DEBUG: FAISS index total vectors after loading: {index.ntotal}"
-            )  # Debug
+            print(f"📌 DEBUG: FAISS index total vectors after loading: {index.ntotal}")
 
         except Exception as e:
             print(f"🚨 ERROR: Failed to load FAISS index, reinitializing → {e}")
             db = next(get_db())  # Get a database session
-            index = rebuild_faiss_index(db) or faiss.IndexIDMap(
-                faiss.IndexFlatIP(embedding_dim)
-            )
+            index = rebuild_faiss_index(db) or faiss.IndexIDMap(faiss.IndexFlatL2(384))
 
     else:
         print("🚀 No saved FAISS index found. Rebuilding from database...")
         db = next(get_db())  # Get a database session
-        index = rebuild_faiss_index(db) or faiss.IndexIDMap(
-            faiss.IndexFlatIP(embedding_dim)
-        )
+        index = rebuild_faiss_index(db) or faiss.IndexIDMap(faiss.IndexFlatL2(384))
 
     print(
         f"📌 DEBUG: FAISS index total vectors after loading/rebuilding: {index.ntotal}"
-    )  # Debug
+    )
     return index
 
 
