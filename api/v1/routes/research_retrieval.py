@@ -210,11 +210,19 @@ async def faiss_search(query: str, top_k: int = 5, db: Session = Depends(get_db)
             print("⚠️ DEBUG: No embedding generated for query.")
             return {"query": query, "results": []}
 
-        # Ensure embedding is a proper NumPy array with shape (1, embedding_dim)
+        # Ensure embedding is a NumPy array with shape (1, embedding_dim)
         query_embedding = np.array(query_embedding, dtype=np.float32).reshape(1, -1)
 
         # ✅ Step 2: Search FAISS index
+        print(
+            f"📌 DEBUG: FAISS index total vectors: {index.ntotal}"
+        )  # Check index size
+
         D, I = index.search(query_embedding, top_k)
+
+        # Debugging output: Check returned indices and distances
+        print(f"📌 DEBUG: FAISS search result indices: {I}")
+        print(f"📌 DEBUG: FAISS search result distances: {D}")
 
         # ✅ Step 3: Convert indices & filter out invalid ones
         valid_indices = [int(idx) for idx in I[0] if idx >= 0]
