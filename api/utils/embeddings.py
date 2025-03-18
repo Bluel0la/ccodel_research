@@ -14,6 +14,9 @@ from dotenv import load_dotenv
 from google.auth import load_credentials_from_file, default
 import io
 import chardet
+from api.db.database import get_db  # Ensure this function is correctly implemented
+
+db = next(get_db())  # Get a database session
 
 load_dotenv(".env")
 
@@ -47,11 +50,11 @@ embedding_dim = 384  # Make sure this matches the model output
 
 # Load FAISS index
 def load_faiss_index():
-    """Load FAISS index from disk or initialize a new one."""
+    """Load FAISS index from disk or rebuild it from the database if not found."""
     global index
     if os.path.exists(FAISS_INDEX_PATH):
         try:
-            print("Loading FAISS Index from the disk...")
+            print("📂 Loading FAISS Index from disk...")
             index = faiss.read_index(FAISS_INDEX_PATH)
 
             # Ensure the index is wrapped properly
@@ -61,14 +64,19 @@ def load_faiss_index():
 
         except Exception as e:
             print(f"🚨 ERROR: Failed to load FAISS index, reinitializing → {e}")
-            base_index = faiss.IndexFlatIP(embedding_dim)
-            index = faiss.IndexIDMap(base_index)
-            save_faiss_index()  # Ensure the new index is saved
+            db = next(get_db())  # Get a database session
+            index = rebuild_faiss_index(db) or faiss.IndexIDMap(
+                faiss.IndexFlatIP(embedding_dim)
+            )
 
     else:
-        print("🚀 No saved FAISS index found. Creating a new one...")
-        base_index = faiss.IndexFlatIP(embedding_dim)
-        index = faiss.IndexIDMap(base_index)
+        print("🚀 No saved FAISS index found. Rebuilding from database...")
+        db = next(get_db())  # Get a database session
+        index = rebuild_faiss_index(db) or faiss.IndexIDMap(
+            faiss.IndexFlatIP(embedding_dim)
+        )
+
+    return index
 
 
 # Save FAISS index
@@ -79,9 +87,6 @@ def save_faiss_index():
 # Initialize FAISS
 index = None
 load_faiss_index()
-
-
-import numpy as np
 
 
 async def fetch_embedding_from_vertex(text: str):
@@ -261,18 +266,28 @@ async def extract_text_from_pdf_async(pdf_url: str) -> str:
 
 
 def rebuild_faiss_index(db: Session):
-    """Rebuild FAISS index from the database if necessary."""
-    global index
-    index = faiss.IndexFlatIP(embedding_dim)  # Reset index with correct similarity metric
+    """Rebuild FAISS index from database embeddings"""
+    print("🔄 Rebuilding FAISS index...")
 
-    embeddings = db.query(PaperEmbedding).all()
+    # ✅ Step 1: Fetch all embeddings from the database
+    papers = db.query(PaperEmbedding.id, PaperEmbedding.embedding).all()
 
-    vectors = []
-    ids = []
-    for paper in embeddings:
-        vectors.append(np.array(paper.embedding, dtype=np.float32))
-        ids.append(paper.id)
+    if not papers:
+        print("⚠️ No embeddings found in database. FAISS index will be empty.")
+        return None
 
-    if vectors:
-        index.add_with_ids(np.vstack(vectors), np.array(ids, dtype=np.int64))
-        save_faiss_index()
+    # ✅ Step 2: Convert to NumPy arrays
+    ids = np.array([paper.id for paper in papers], dtype=np.int64)
+    embeddings = np.array([paper.embedding for paper in papers], dtype=np.float32)
+
+    # ✅ Step 3: Create a new FAISS index
+    index = faiss.IndexFlatL2(embedding_dim)  # L2 distance (Euclidean)
+
+    # ✅ Step 4: Add embeddings to the FAISS index
+    index.add(embeddings)
+
+    # ✅ Step 5: Save index to disk
+    faiss.write_index(index, FAISS_INDEX_PATH)
+    print(f"✅ FAISS index rebuilt with {index.ntotal} embeddings.")
+
+    return index
