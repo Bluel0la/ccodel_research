@@ -13,6 +13,8 @@ from endpoint_tester import predict_custom_trained_model
 from dotenv import load_dotenv
 from google.auth import load_credentials_from_file, default
 import io
+import chardet
+
 load_dotenv(".env")
 
 MAX_TOKENS = 255  # Vertex AI limit
@@ -79,6 +81,9 @@ index = None
 load_faiss_index()
 
 
+import numpy as np
+
+
 async def fetch_embedding_from_vertex(text: str):
     """Fetch embeddings for text, splitting into batches if necessary."""
 
@@ -97,7 +102,13 @@ async def fetch_embedding_from_vertex(text: str):
             )
 
             if response:
-                embeddings.append(np.array(response[0], dtype=np.float32))
+                embedding = np.array(response[0], dtype=np.float32)
+
+                # Ensure the embedding has the correct shape (384,) instead of (1, 384)
+                if len(embedding.shape) == 2:
+                    embedding = embedding.squeeze(0)  # Converts (1, 384) → (384,)
+
+                embeddings.append(embedding)
 
         except Exception as e:
             print(f"🚨 ERROR: Vertex AI request failed → {e}")
@@ -212,7 +223,7 @@ async def extract_text_from_webpage_async(url: str, max_retries=3) -> str:
 
 
 def extract_text_from_pdf(pdf_url: str) -> str:
-    """Extract text from a given PDF link without saving to disk."""
+    """Extract text from a given PDF link without saving to disk, handling encoding issues."""
     try:
         response = requests.get(pdf_url, stream=True, timeout=10)
         response.raise_for_status()
@@ -225,7 +236,12 @@ def extract_text_from_pdf(pdf_url: str) -> str:
             for page in doc:
                 text += page.get_text("text") + "\n"
 
-        return text.strip()
+        # Detect encoding and decode properly
+        detected = chardet.detect(text.encode())
+        encoding = detected.get("encoding", "utf-8")
+
+        return text.encode(encoding, errors="replace").decode("utf-8").strip()
+
     except Exception as e:
         print(f"❌ Error extracting text from PDF: {e}")
         return ""
