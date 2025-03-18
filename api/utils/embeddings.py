@@ -48,6 +48,37 @@ def chunk_text(text, chunk_size=1000):
 embedding_dim = 384  # Make sure this matches the model output
 
 
+def rebuild_faiss_index(db: Session):
+    """Rebuild FAISS index from database embeddings"""
+    print("🔄 Rebuilding FAISS index...")
+
+    # ✅ Step 1: Fetch all embeddings from the database
+    papers = db.query(PaperEmbedding.id, PaperEmbedding.embedding).all()
+    print(f"📌 DEBUG: Retrieved {len(papers)} embeddings from DB")  # Add this debug
+
+    if not papers:
+        print("⚠️ No embeddings found in database. FAISS index will be empty.")
+        return None
+
+    # ✅ Step 2: Convert to NumPy arrays
+    ids = np.array([paper.id for paper in papers], dtype=np.int64)
+    embeddings = np.array([paper.embedding for paper in papers], dtype=np.float32)
+    print(f"📌 DEBUG: NumPy array shape: {embeddings.shape}")  # Add this debug
+
+    # ✅ Step 3: Create a new FAISS index
+    index = faiss.IndexFlatL2(embeddings.shape[1])  # Ensure embedding_dim is correct
+
+    # ✅ Step 4: Add embeddings to the FAISS index
+    index.add(embeddings)
+    print(f"✅ FAISS index built with {index.ntotal} vectors")  # Add this debug
+
+    # ✅ Step 5: Save index to disk
+    faiss.write_index(index, FAISS_INDEX_PATH)
+    print(f"✅ FAISS index saved with {index.ntotal} embeddings.")
+
+    return index
+
+
 # Load FAISS index
 def load_faiss_index():
     """Load FAISS index from disk or rebuild it from the database if not found."""
@@ -61,6 +92,10 @@ def load_faiss_index():
             if not isinstance(index, faiss.IndexIDMap):
                 print("⚠️ Index is not ID-mapped. Wrapping it in IndexIDMap...")
                 index = faiss.IndexIDMap(index)
+
+            print(
+                f"📌 DEBUG: FAISS index total vectors after loading: {index.ntotal}"
+            )  # Debug
 
         except Exception as e:
             print(f"🚨 ERROR: Failed to load FAISS index, reinitializing → {e}")
@@ -76,6 +111,9 @@ def load_faiss_index():
             faiss.IndexFlatIP(embedding_dim)
         )
 
+    print(
+        f"📌 DEBUG: FAISS index total vectors after loading/rebuilding: {index.ntotal}"
+    )  # Debug
     return index
 
 
@@ -263,31 +301,3 @@ async def extract_text_from_pdf_async(pdf_url: str) -> str:
     except Exception as e:
         print(f"❌ Error extracting text from PDF: {e}")
         return ""
-
-
-def rebuild_faiss_index(db: Session):
-    """Rebuild FAISS index from database embeddings"""
-    print("🔄 Rebuilding FAISS index...")
-
-    # ✅ Step 1: Fetch all embeddings from the database
-    papers = db.query(PaperEmbedding.id, PaperEmbedding.embedding).all()
-
-    if not papers:
-        print("⚠️ No embeddings found in database. FAISS index will be empty.")
-        return None
-
-    # ✅ Step 2: Convert to NumPy arrays
-    ids = np.array([paper.id for paper in papers], dtype=np.int64)
-    embeddings = np.array([paper.embedding for paper in papers], dtype=np.float32)
-
-    # ✅ Step 3: Create a new FAISS index
-    index = faiss.IndexFlatL2(embedding_dim)  # L2 distance (Euclidean)
-
-    # ✅ Step 4: Add embeddings to the FAISS index
-    index.add(embeddings)
-
-    # ✅ Step 5: Save index to disk
-    faiss.write_index(index, FAISS_INDEX_PATH)
-    print(f"✅ FAISS index rebuilt with {index.ntotal} embeddings.")
-
-    return index
