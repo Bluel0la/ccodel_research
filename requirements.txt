@@ -57,6 +57,7 @@ proto-plus==1.26.1
 protobuf==5.29.3
 psycopg2-binary==2.9.10
 pyasn1==0.6.1
+python-docx
 pyasn1_modules==0.4.1
 pydantic==2.10.6
 pydantic_core==2.27.2

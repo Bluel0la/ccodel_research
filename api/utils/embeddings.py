@@ -13,6 +13,7 @@ from endpoint_tester import predict_custom_trained_model
 from dotenv import load_dotenv
 from google.auth import load_credentials_from_file, default
 import io
+import docx
 import chardet
 from api.db.database import get_db  # Ensure this function is correctly implemented
 from playwright.async_api import async_playwright
@@ -124,7 +125,7 @@ def save_faiss_index():
 index = None
 load_faiss_index()
 
-
+# Embeddings
 async def fetch_embedding_from_vertex(text: str):
     """Fetch embeddings for text, splitting into batches if necessary."""
 
@@ -228,6 +229,8 @@ async def process_and_store_paper_embeddings(papers, db: Session):
     print("💾 DEBUG: Database commit complete.")
     save_faiss_index()  # Save FAISS after update
 
+
+# Text extraction
 
 async def extract_text_from_webpage_async(url: str, max_retries=3) -> str:
     """Asynchronously extract text from a webpage, handling JS-heavy sites & captchas."""
@@ -358,3 +361,33 @@ async def extract_text_from_pdf_async(pdf_url: str) -> str:
     except Exception as e:
         print(f"❌ Error extracting text from PDF: {e}")
         return ""
+
+
+def extract_text_from_file(file_path: str) -> str:
+    """Extract text from PDF or DOCX file."""
+    if file_path.endswith(".pdf"):
+        return extract_text_from_pdf(file_path)
+    elif file_path.endswith(".docx"):
+        return extract_text_from_docx(file_path)
+    return ""
+
+
+def extract_text_from_pdf(pdf_path: str) -> str:
+    """Extract text from a PDF file."""
+    try:
+        doc = fitz.open(pdf_path)
+        return "\n".join([page.get_text("text") for page in doc])
+    except Exception as e:
+        print(f"Error extracting text from PDF: {e}")
+        return ""
+
+
+def extract_text_from_docx(docx_path: str) -> str:
+    """Extract text from a DOCX file."""
+    try:
+        doc = docx.Document(docx_path)
+        return "\n".join([para.text for para in doc.paragraphs if para.text.strip()])
+    except Exception as e:
+        print(f"Error extracting text from DOCX: {e}")
+        return ""
+

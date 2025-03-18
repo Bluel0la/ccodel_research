@@ -2,7 +2,8 @@ import httpx
 import os
 import asyncio
 from datetime import datetime, timedelta
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
+import shutil
 from sqlalchemy.orm import Session
 from dotenv import load_dotenv
 from api.db.database import get_db
@@ -10,17 +11,22 @@ from api.v1.models.cache import CachedResult
 from api.utils.embeddings import (
     process_and_store_paper_embeddings,
     extract_text_from_pdf_async,
-    extract_text_from_webpage_async
+    extract_text_from_webpage_async,
+    extract_text_from_file,
+    rebuild_faiss_index,
+    chunk_text
 )
 from api.utils.embeddings import index, fetch_embedding_from_vertex
 from api.v1.models.embeddings import PaperEmbedding
 import numpy as np
 import re
 from xml.etree import ElementTree as ET
-from endpoint_tester import predict_custom_trained_model
-# Load environment variables
+import faiss
 load_dotenv()
 
+
+UPLOAD_DIR = "uploaded_files"
+os.makedirs(UPLOAD_DIR, exist_ok=True)
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 GOOGLE_CX = os.getenv("GOOGLE_CX")
 SERP_API_KEY = os.getenv("SERP_API_KEY")
@@ -140,6 +146,8 @@ def clean_text(text):
     )  # Remove boilerplate
     return text.strip()
 
+
+# Endpoints
 
 @research.get("/search/")
 async def search_papers(query: str, db: Session = Depends(get_db)):
@@ -261,3 +269,115 @@ async def faiss_search(query: str, top_k: int = 5, db: Session = Depends(get_db)
     except Exception as e:
         print(f"❌ ERROR: {e}")
         return {"query": query, "results": [], "error": str(e)}
+
+
+@research.post("/upload/")
+async def upload_file(file: UploadFile = File(...), db: Session = Depends(get_db)):
+    """Upload a PDF or DOCX file, extract text, generate embeddings, and store them."""
+    file_path = os.path.join(UPLOAD_DIR, file.filename)
+
+    # Save the uploaded file
+    with open(file_path, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+
+    # Extract text
+    text = extract_text_from_file(file_path)
+    if not text:
+        raise HTTPException(status_code=400, detail="Could not extract text from file.")
+
+    # Chunk text
+    text_chunks = chunk_text(text)
+
+    # Generate embeddings for each chunk
+    embeddings = []
+    for chunk in text_chunks:
+        embedding = await fetch_embedding_from_vertex(chunk)  # Await the coroutine
+        if embedding is not None:
+            embeddings.append(embedding.tolist())  # Convert to list
+
+    if not embeddings:
+        raise HTTPException(status_code=500, detail="Failed to generate embeddings.")
+
+    # Store in database
+    for emb in embeddings:
+        new_entry = PaperEmbedding(
+            title=file.filename,
+            abstract="",
+            key_findings=[],
+            link=file_path,
+            embedding=emb,
+        )
+        db.add(new_entry)
+    db.commit()
+
+    # Update FAISS index
+    rebuild_faiss_index(db)
+    try:
+        os.remove(file_path)
+    except Exception as e:
+        print(f"Failed to delete file {file_path}: {e}")
+
+    return {"message": "File processed and stored successfully", "file": file.filename}
+
+
+def format_context_for_model(query: str, retrieved_docs):
+    """Format retrieved research papers into a structured prompt."""
+
+    context = ""
+    for doc in retrieved_docs:
+        context += f"Title: {doc['title']}\n"
+        context += f"Key Findings: {', '.join(doc['key_findings'])}\n"
+        context += f"Abstract: {doc['text']}\n\n"
+
+    
+    return format
+
+
+def search_relevant_docs(query: str, db: Session, top_k=5):
+    """Retrieve top_k most relevant documents using FAISS."""
+
+    # Convert query to embedding
+    query_embedding = fetch_embedding_from_vertex(query)
+    if query_embedding is None:
+        raise ValueError("Failed to generate query embedding")
+
+    # Convert to numpy array
+    query_vector = np.array(query_embedding).astype("float32").reshape(1, -1)
+
+    # Load FAISS index
+    index = faiss.read_index("faiss_index.bin")
+
+    # Search FAISS for similar embeddings
+    distances, indices = index.search(query_vector, top_k)
+
+    # Fetch the corresponding documents from the database
+    results = []
+    for idx in indices[0]:
+        if idx == -1:  # FAISS returns -1 if no match is found
+            continue
+        doc = db.query(PaperEmbedding).filter(PaperEmbedding.id == idx).first()
+        if doc:
+            results.append(
+                {
+                    "title": doc.title,
+                    "text": doc.abstract,
+                    "key_findings": doc.key_findings,
+                }
+            )
+
+    return results
+
+@research.get("/generate_report/")
+def generate_research_report(query: str, db: Session = Depends(get_db)):
+    """Retrieve relevant documents and generate structured text for research reports."""
+    
+    # Retrieve research papers using FAISS
+    retrieved_docs = search_relevant_docs(query, db)
+
+    if not retrieved_docs:
+        return {"report": "No relevant documents found"}
+
+    # Format retrieved documents into structured context
+    formatted_context = format_context_for_model(query, retrieved_docs)
+    
+    return {"query": query, "report": formatted_context}
